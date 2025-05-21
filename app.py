@@ -4,8 +4,9 @@ import jwt
 import datetime
 import os
 import uuid
+import base64 # 이전 단계에서 다운로드 시 Basic Auth 처리를 위해 추가됨
 from functools import wraps
-from flask import Flask, request, jsonify, g, send_from_directory # send_from_directory 임포트
+from flask import Flask, request, jsonify, g, send_from_directory
 from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
@@ -13,17 +14,16 @@ app = Flask(__name__)
 # --- 설정 (Configurations) ---
 app.config['SECRET_KEY'] = 'your_very_secret_key_please_change_it_for_production'
 UPLOAD_FOLDER = 'uploads'
-# 다양한 확장자 허용 (필요에 따라 조정)
 ALLOWED_EXTENSIONS = {
-    'txt', 'log', 'md', 'json', 'xml', 'csv', # 텍스트 기반
-    'pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'hwp', # 문서
-    'png', 'jpg', 'jpeg', 'gif', 'bmp', 'svg', 'ico', # 이미지
-    'mp4', 'mov', 'avi', 'wmv', 'mkv', 'webm', # 비디오
-    'mp3', 'wav', 'ogg', 'flac', # 오디오
-    'zip', 'tar', 'gz', '7z' # 압축 파일
+    'txt', 'log', 'md', 'json', 'xml', 'csv',
+    'pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'hwp',
+    'png', 'jpg', 'jpeg', 'gif', 'bmp', 'svg', 'ico',
+    'mp4', 'mov', 'avi', 'wmv', 'mkv', 'webm',
+    'mp3', 'wav', 'ogg', 'flac',
+    'zip', 'tar', 'gz', '7z'
 }
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
-app.config['MAX_CONTENT_LENGTH'] = 256 * 1024 * 1024  # 최대 업로드 파일 크기 (예: 256MB)
+app.config['MAX_CONTENT_LENGTH'] = 256 * 1024 * 1024
 
 DATABASE = 'object_storage.db'
 
@@ -135,7 +135,7 @@ def login():
         token_payload = {
             'user_id': user['id'],
             'username': user['username'],
-            'exp': datetime.datetime.utcnow() + datetime.timedelta(hours=24) # 토큰 만료 시간 24시간으로 연장
+            'exp': datetime.datetime.utcnow() + datetime.timedelta(hours=24)
         }
         try:
             token = jwt.encode(token_payload, app.config['SECRET_KEY'], algorithm='HS256')
@@ -161,17 +161,14 @@ def upload_file():
     if file and allowed_file(file.filename):
         original_filename = secure_filename(file.filename)
         file_extension = original_filename.rsplit('.', 1)[1].lower() if '.' in original_filename else ''
-        # 실제 저장되는 파일명은 고유하게, 원래 파일명은 DB에 저장
         unique_internal_filename = f"{uuid.uuid4().hex}.{file_extension}" if file_extension else uuid.uuid4().hex
         filepath_on_server = os.path.join(app.config['UPLOAD_FOLDER'], unique_internal_filename)
         try:
             file.save(filepath_on_server)
             filesize = os.path.getsize(filepath_on_server)
-            download_link_id = str(uuid.uuid4()) # 다운로드용 고유 ID
+            download_link_id = str(uuid.uuid4())
             db = get_db()
             cursor = db.cursor()
-            # filepath는 서버 내부 경로이므로, unique_internal_filename을 저장하는 것이 더 적절할 수 있음
-            # 여기서는 전체 경로를 저장
             cursor.execute("""
                 INSERT INTO files (user_id, filename, filepath, filesize, download_link_id, permission)
                 VALUES (?, ?, ?, ?, ?, ?)
@@ -183,7 +180,7 @@ def upload_file():
                 "file_id": file_id,
                 "filename": original_filename,
                 "filesize_bytes": filesize,
-                "download_link_id": download_link_id, # 이 링크로 다운로드 API 접근
+                "download_link_id": download_link_id,
                 "uploaded_by": g.current_username
             }), 201
         except Exception as e:
@@ -222,11 +219,11 @@ def get_file_metadata(file_id):
     cursor = db.cursor()
     try:
         cursor.execute("""
-            SELECT f.id, f.filename, f.filesize, f.upload_time, f.permission, f.download_link_id, u.username as owner_username
+            SELECT f.id, f.filename, f.filesize, f.upload_time, f.permission, f.download_link_id, f.user_id, u.username as owner_username
             FROM files f
             JOIN users u ON f.user_id = u.id
             WHERE f.id = ?
-        """, (file_id,))
+        """, (file_id,)) # user_id도 SELECT에 추가
         file_data_row = cursor.fetchone()
     except sqlite3.Error as e:
         return jsonify({"message": "Database error fetching file metadata: " + str(e)}), 500
@@ -234,138 +231,102 @@ def get_file_metadata(file_id):
     if not file_data_row:
         return jsonify({"message": "File not found"}), 404
 
-    file_info = dict(file_data_row) # sqlite3.Row를 딕셔너리로 변환
+    file_info = dict(file_data_row)
 
-    # 소유권 확인 또는 공개 파일인지 확인
-    # files 테이블에서 user_id를 직접 가져와서 비교하는 것이 더 명확
-    cursor.execute("SELECT user_id FROM files WHERE id = ?", (file_id,))
-    owner_check = cursor.fetchone()
-
-    # 현재는 소유자만 메타데이터 조회 가능하도록 함. 공개 파일도 허용하려면 조건 추가
-    if not owner_check or (owner_check['user_id'] != g.current_user_id and file_info['permission'] != 'public'):
+    if file_info['user_id'] != g.current_user_id and file_info['permission'] != 'public':
          return jsonify({"message": "Access denied or file not found"}), 403
     
+    # user_id는 응답에서 제외할 수 있음 (필요에 따라)
+    # del file_info['user_id'] 
     return jsonify(file_info), 200
 
-
-# --- 파일 접근 권한 설정 API (PUT /files/<file_id>/permission) ---
+# --- 파일 접근 권한 설정 API (이전과 동일) ---
 @app.route('/files/<int:file_id>/permission', methods=['PUT'])
-@token_required # JWT 인증 필요
+@token_required
 def set_file_permission(file_id):
     data = request.get_json()
-    new_permission = data.get('permission') # 'public', 'private', 'password'
-    file_password = data.get('password') # 'password' 권한 설정 시 필요
+    new_permission = data.get('permission')
+    file_password = data.get('password')
 
     if not new_permission or new_permission not in ['public', 'private', 'password']:
         return jsonify({"message": "Invalid permission value. Must be 'public', 'private', or 'password'."}), 400
-
     if new_permission == 'password' and not file_password:
         return jsonify({"message": "Password is required for 'password' permission."}), 400
 
     db = get_db()
     cursor = db.cursor()
-
-    # 파일 존재 및 소유권 확인
     try:
         cursor.execute("SELECT user_id, permission, access_password_hash FROM files WHERE id = ?", (file_id,))
         file_record = cursor.fetchone()
     except sqlite3.Error as e:
         return jsonify({"message": "Database error fetching file: " + str(e)}), 500
-
     if not file_record:
         return jsonify({"message": "File not found"}), 404
-
     if file_record['user_id'] != g.current_user_id:
         return jsonify({"message": "Access denied. You are not the owner of this file."}), 403
 
-    new_access_password_hash = file_record['access_password_hash'] # 기본값은 기존 해시값
-
+    new_access_password_hash = file_record['access_password_hash']
     if new_permission == 'password':
         hashed_pw_bytes = bcrypt.hashpw(file_password.encode('utf-8'), bcrypt.gensalt())
         new_access_password_hash = hashed_pw_bytes.decode('utf-8')
-    elif file_record['permission'] == 'password' and new_permission != 'password': # 비밀번호 권한에서 다른 권한으로 변경 시
-        new_access_password_hash = None # 기존 비밀번호 해시 제거
-
+    elif file_record['permission'] == 'password' and new_permission != 'password':
+        new_access_password_hash = None
     try:
         cursor.execute("""
-            UPDATE files
-            SET permission = ?, access_password_hash = ?
-            WHERE id = ?
+            UPDATE files SET permission = ?, access_password_hash = ? WHERE id = ?
         """, (new_permission, new_access_password_hash, file_id))
         db.commit()
     except sqlite3.Error as e:
         db.rollback()
         return jsonify({"message": "Database error updating permission: " + str(e)}), 500
-
     return jsonify({"message": f"File permission updated to '{new_permission}' successfully."}), 200
 
-
-# --- 파일 다운로드 API (GET /download/<link_id>) ---
+# --- 파일 다운로드 API (이전과 동일) ---
 @app.route('/download/<string:link_id>', methods=['GET'])
 def download_file_with_link(link_id):
     db = get_db()
     cursor = db.cursor()
-
     try:
-        # download_link_id로 파일 정보 조회
         cursor.execute("""
             SELECT id, filename, filepath, permission, access_password_hash, user_id
-            FROM files
-            WHERE download_link_id = ?
+            FROM files WHERE download_link_id = ?
         """, (link_id,))
         file_record = cursor.fetchone()
     except sqlite3.Error as e:
         return jsonify({"message": "Database error fetching file by link: " + str(e)}), 500
-
     if not file_record:
         return jsonify({"message": "Invalid download link or file not found."}), 404
 
-    # 파일 정보
     original_filename = file_record['filename']
-    server_filepath = file_record['filepath'] # 서버 내 실제 파일 경로
+    server_filepath = file_record['filepath']
     file_permission = file_record['permission']
     stored_password_hash_str = file_record['access_password_hash']
     
-    # 파일이 실제로 서버에 존재하는지 확인
     if not os.path.exists(server_filepath):
+        # DB에는 기록이 있지만 실제 파일이 없는 경우, DB 기록도 삭제하는 로직 추가 가능 (선택적)
+        # cursor.execute("DELETE FROM files WHERE download_link_id = ?", (link_id,))
+        # db.commit()
         return jsonify({"message": "File not found on server. It might have been deleted."}), 404
 
-
-    # 1. 공개 파일 ('public') 처리
     if file_permission == 'public':
         try:
-            # send_from_directory는 디렉토리와 파일명을 인자로 받음
-            # server_filepath에서 디렉토리와 파일명 분리 필요
             directory = os.path.dirname(server_filepath)
             filename_on_server = os.path.basename(server_filepath)
             return send_from_directory(directory, filename_on_server, as_attachment=True, download_name=original_filename)
         except Exception as e:
             return jsonify({"message": "Error sending file: " + str(e)}), 500
-
-    # 2. 비밀번호로 보호된 파일 ('password') 처리
     elif file_permission == 'password':
-        # 비밀번호는 요청 헤더나 쿼리 파라미터로 받을 수 있음. 여기서는 쿼리 파라미터 'password' 사용
         provided_password = request.args.get('password')
         if not provided_password:
-            # 또는 'Authorization: Basic base64(username:password)' 형태도 고려 가능
             auth_header = request.headers.get('Authorization')
             if auth_header and auth_header.startswith('Basic '):
                 try:
-                    # 'Basic ' 제거 후 base64 디코딩, username:password 형태에서 password 추출
-                    # 실제 username은 사용하지 않으므로, _:password 형태로 받을 수 있음
                     decoded_str = base64.b64decode(auth_header.split(" ")[1]).decode('utf-8')
-                    # username:password 또는 password만 오는 경우 처리
-                    if ':' in decoded_str:
-                        provided_password = decoded_str.split(':', 1)[1]
-                    else:
-                        provided_password = decoded_str
+                    provided_password = decoded_str.split(':', 1)[1] if ':' in decoded_str else decoded_str
                 except Exception:
                     return jsonify({"message": "Malformed Basic Auth header for password."}), 400
-            
             if not provided_password:
-                 return jsonify({"message": "Password required for this file. Provide as query parameter 'password' or Basic Auth."}), 401
-
-
+                 return jsonify({"message": "Password required. Provide as query parameter 'password' or Basic Auth."}), 401
         if stored_password_hash_str and bcrypt.checkpw(provided_password.encode('utf-8'), stored_password_hash_str.encode('utf-8')):
             try:
                 directory = os.path.dirname(server_filepath)
@@ -374,33 +335,69 @@ def download_file_with_link(link_id):
             except Exception as e:
                 return jsonify({"message": "Error sending file: " + str(e)}), 500
         else:
-            return jsonify({"message": "Incorrect password."}), 401 # Unauthorized
-
-    # 3. 비공개 파일 ('private') 처리
-    # 'private' 파일은 이 /download/<link_id> 엔드포인트로는 직접 다운로드 불가.
-    # 소유자만 자신의 파일 목록에서 다른 방식으로 다운로드 받거나,
-    # 또는 이 엔드포인트에 JWT 인증을 추가하고 소유자일 경우에만 허용해야 함.
-    # 과제 요구사항: "접근 가능한 경우만 다운로드 허용"
-    # 현재는 'private' 파일은 이 링크로 다운로드할 수 없도록 처리.
+            return jsonify({"message": "Incorrect password."}), 401
     elif file_permission == 'private':
-        # 소유자인지 확인 (JWT 토큰 필요)
-        # 이 엔드포인트는 기본적으로 토큰 없이 접근 가능하도록 설계되어 있으므로,
-        # private 파일 다운로드를 위해서는 별도의 인증된 엔드포인트가 필요하거나,
-        # 이 엔드포인트에서 선택적으로 토큰을 확인해야 함.
-        # 여기서는 간단히 private 파일은 이 링크로 접근 불가로 처리.
-        # 소유자는 /files/<id>/download (새 엔드포인트) 등으로 접근하게 할 수 있음.
-        # 또는, 이 download_link_id가 소유자에게만 노출된다고 가정하고,
-        # 소유자가 이 링크로 접근 시 user_id를 어떻게든 확인해야 함. (복잡)
-        # 가장 간단한 방법은, 'private' 파일은 이 공개 링크로는 다운로드할 수 없게 하는 것.
-        # 사용자가 로그인 후 자신의 파일 목록에서 다운로드 받는 API를 따로 만드는 것이 좋음.
-        # 여기서는 일단 접근 거부.
         return jsonify({"message": "This file is private and cannot be downloaded via this link without owner authentication."}), 403
-
-
-    else: # 정의되지 않은 권한
+    else:
         return jsonify({"message": "File has an unknown permission type."}), 500
-        
+
+# --- 업로드한 파일 삭제 API (DELETE /files/<file_id>) ---
+@app.route('/files/<int:file_id>', methods=['DELETE'])
+@token_required # JWT 인증 필요
+def delete_file(file_id):
+    """
+    특정 파일 ID에 해당하는 파일을 삭제합니다.
+    파일 소유자만 자신의 파일을 삭제할 수 있습니다.
+    서버의 실제 파일과 데이터베이스의 메타데이터를 모두 삭제합니다.
+    """
+    db = get_db()
+    cursor = db.cursor()
+
+    # 파일 존재 및 소유권 확인, 그리고 파일 경로 가져오기
+    try:
+        cursor.execute("SELECT user_id, filepath FROM files WHERE id = ?", (file_id,))
+        file_record = cursor.fetchone()
+    except sqlite3.Error as e:
+        return jsonify({"message": "Database error fetching file for deletion: " + str(e)}), 500
+
+    if not file_record:
+        return jsonify({"message": "File not found"}), 404
+
+    if file_record['user_id'] != g.current_user_id:
+        return jsonify({"message": "Access denied. You are not the owner of this file."}), 403
+
+    server_filepath_to_delete = file_record['filepath']
+
+    try:
+        # 1. 데이터베이스에서 파일 메타데이터 삭제
+        cursor.execute("DELETE FROM files WHERE id = ?", (file_id,))
+        # db.commit() # 실제 파일 삭제 성공 후 커밋하는 것이 더 안전할 수 있음
+
+        # 2. 서버에서 실제 파일 삭제
+        if os.path.exists(server_filepath_to_delete):
+            os.remove(server_filepath_to_delete)
+        else:
+            # DB에는 있었지만 실제 파일이 없는 경우, 경고 로그를 남길 수 있음
+            print(f"Warning: File {server_filepath_to_delete} not found on server but was in DB.")
+            # 이 경우에도 DB 레코드는 삭제하는 것이 일반적임
+
+        db.commit() # 모든 작업 성공 후 최종 커밋
+        return jsonify({"message": "File deleted successfully"}), 200
+    
+    except sqlite3.Error as e_db:
+        db.rollback()
+        return jsonify({"message": "Database error during file deletion: " + str(e_db)}), 500
+    except OSError as e_os:
+        # 실제 파일 삭제 중 오류 발생 시 DB 롤백 (이미 커밋했다면 별도 처리 필요)
+        # 위에서는 DB 삭제 후 파일 삭제 순서이므로, 파일 삭제 실패 시 DB는 이미 삭제되었을 수 있음.
+        # 순서를 바꾸거나, 트랜잭션 관리를 더 정교하게 할 수 있음.
+        # 여기서는 DB 삭제를 먼저 시도하고, 파일 삭제 실패 시에도 DB는 삭제된 상태로 둘 수 있음 (또는 롤백)
+        db.rollback() # 파일 시스템 오류 시에도 DB 롤백
+        return jsonify({"message": "Error deleting file from server: " + str(e_os)}), 500
+    except Exception as e:
+        db.rollback()
+        return jsonify({"message": "An unexpected error occurred during file deletion: " + str(e)}), 500
+
 # 애플리케이션 실행
 if __name__ == '__main__':
-    import base64 # download_file_with_link 함수 내 Basic Auth 처리를 위해 추가
     app.run(host='0.0.0.0', port=5050, debug=True)
